@@ -18,63 +18,86 @@
 #>  
 
 # change the following parameters
-$BD_HOST="192.168.2.16"
-$BD_PORT="8080"
-$BD_USERNAME="sysadmin"
-$BD_PASSWORD="blackduck"
+
+param (
+    [Parameter(Mandatory=$true)][string]$serverUrl,
+    [Parameter(Mandatory=$true)][string]$username,
+    [string]$password = $( Read-Host "Input password: " ),
+    [string]$curlCmd
+ )
+
 $COOKIE_FILE_NAME="bds-hub-cookie.txt"
-$SCHEME="http"
-
-#$DebugPreference = "Continue"
-
 
 ########  DON'T TOUCH THESE PARAMETERS ################
 $SCRIPT_DIR=Split-Path -Parent $PSCommandPath
 Write-Debug  $SCRIPT_DIR
-$CURL_EXE="$SCRIPT_DIR\curl.exe"
+$CURL_EXE = If ($curlCmd -eq $null) { "$SCRIPT_DIR\curl.exe" } Else { $curlCmd }
 $COOKIE_FILE_PATH="$SCRIPT_DIR\$COOKIE_FILE_NAME"
 Write-Debug $CURL_EXE
-$SERVER_URL="http://${BD_HOST}:${BD_PORT}"
 ######################################################
 
+function Login {
+    #get the cookie from the hub
+    $OUTPUT=&(${CURL_EXE}) -s -X POST --data "j_username=${username}&j_password=${password}" -i  ${serverUrl}/j_spring_security_check -c "$COOKIE_FILE_PATH"
+    Write-Host "URL: " $serverUrl
+    Write-Debug $OUTPUT.ToString()
+}
 
-#get the cookie from the hub
-$OUTPUT=&(${CURL_EXE}) -s -X POST --data "j_username=${BD_USERNAME}&j_password=${BD_PASSWORD}" -i  ${SERVER_URL}/j_spring_security_check -c "$COOKIE_FILE_PATH"
-Write-Debug $OUTPUT.ToString()
+function Get-RelLink {
 
-$HUB_PROJECTS=&(${CURL_EXE}) -s -X GET --header "Accept: application/json" -b $COOKIE_FILE_PATH "${SERVER_URL}/api/v1/risk-profile-projects?limit=100&sortField=name&ascending=true&offset=0&_=1473846139495" | ConvertFrom-Json 
-Write-Debug $HUB_PROJECTS
+    Param ([PSCustomObject]$rep, [string]$rel)
 
-
-# print a table with project data , this is just a sample much more data to display if you want
-$HUB_PROJECTS.items | Select-Object @{Name="id";Expression={ $_.id }},@{Name="Project Name";Expression={ $_.name }}, @{Name="Policy violation";Expression={ $_.policyStatus }}, @{Name="Last scan date";Expression={ $_.lastScanDate }} | Format-Table -AutoSize
-
-
-foreach( $proj in $HUB_PROJECTS.items){
-   Write-Host "`n`n################################ PROJECT ################################"
-   $id=$proj.id
-   $proj_versions=&(${CURL_EXE}) -s -X GET --header "Accept: application/json" -b $COOKIE_FILE_PATH "${SERVER_URL}/api/v1/composite/projects/${id}/releases?limit=100&sortField=bomCounts&ascending=false&offset=0&additionalInfoOptions=BomCount&additionalInfoOptions=VulnerabilitiesCount&additionalInfoOptions=ScanDate&additionalInfoOptions=LastBomUpdateDate&additionalInfoOptions=RiskProfile" | ConvertFrom-Json
-   Write-Host "project :" $proj.name
-   Write-Host "number of versions :" $proj_versions.totalCount
-   foreach( $ver in $proj_versions.items){
-        Write-Host "`tversion : " $ver.release.version
-        Write-Debug  $ver.release.id
-        $ver_id=$ver.release.id        
-        $vulnerable_components=&(${CURL_EXE}) -s -X GET --header "Accept: application/json" -b $COOKIE_FILE_PATH "${SERVER_URL}/api/v1/releases/$ver_id/vulnerability-bom?limit=100&sortField=project.name&ascending=true&offset=0&aggregationEntityType=RL&inUseOnly=true&filter=remediationType%3ANEEDS_REVIEW&filter=remediationType%3AREMEDIATION_REQUIRED&filter=remediationType%3ANEW" | ConvertFrom-Json 
-        #Write-Host "    " $vulnerable_components
-        foreach ( $comp in $vulnerable_components.items){
-           Write-Host "`t`tcomponent: " $comp.project.name " " $comp.release.version
-           $oss_comp_id=$comp.project.id
-           $oss_comp_release_id=$comp.release.id
-           $channelRelease_id=$comp.channelRelease.id
-           Write-Debug "${SERVER_URL}/api/v1/releases/$id/RL/$ver_id/channels/$channelRelease_id/vulnerabilities?limit=100&sortField=baseScore&offset=0"
-           $oss_comp_vulnerabilities=&(${CURL_EXE}) -s -X GET --header "Accept: application/json" -b $COOKIE_FILE_PATH "${SERVER_URL}/api/v1/releases/$ver_id/RL/$oss_comp_release_id/channels/$channelRelease_id/vulnerabilities?limit=100&sortField=baseScore&offset=0" | ConvertFrom-Json 
-           Write-Debug $oss_comp_vulnerabilities
-           foreach ( $vuln in $oss_comp_vulnerabilities.items){
-              Write-Host  "`t`t`t" $vuln.id
-           }
+    foreach($link in $rep._meta.links) {
+        if($link.rel.Equals($rel)) {
+            return $link.href
         }
-        
+    }
+
+    Write-Host "Could not find Project/Versions URL: " $rep._meta.links
+    Write-Host "Tried looking for rel: " $rel
+    return $null
+}
+
+########################################################################################################################
+########################################################################################################################
+
+## Login First
+Login
+
+$HUB_PROJECTS_P=&(${CURL_EXE}) -s -X GET --header "Accept: application/json" -b $COOKIE_FILE_PATH "${serverUrl}/api/projects" | ConvertFrom-Json 
+
+foreach( $proj in $HUB_PROJECTS_P.items){
+    Write-Host "`n`n################################ PROJECT ################################"
+
+    $project_versions_url = Get-RelLink -rep $proj -rel "versions" 
+
+    if(!$project_versions_url) {
+        Write-Host "ERROR: Could not find versions URL for Project: " $proj.name
+        continue
+    } 
+
+    $proj_versions=&(${CURL_EXE}) -s -X GET --header "Accept: application/json" -b $COOKIE_FILE_PATH $project_versions_url | ConvertFrom-Json
+    Write-Host "project :" $proj.name
+    Write-Host "number of versions :" $proj_versions.totalCount
+
+    foreach( $ver in $proj_versions.items){
+        Write-Host "`tversion : " $ver.versionName
+        $vulnerable_components_url = Get-RelLink -rep $ver -rel "vulnerable-components"
+
+        if(!$vulnerable_components_url) {
+            Write-Host "ERROR: Could not find vulnerable-components URL for Version: " $ver.versionName
+            continue
+        } 
+
+        $vulnerable_components=&(${CURL_EXE}) -s -X GET --header "Accept: application/json" -b $COOKIE_FILE_PATH $vulnerable_components_url | ConvertFrom-Json 
+
+        foreach ($comp in $vulnerable_components.items) {
+            Write-Host "`t`tcomponent: " $comp.componentName " " $comp.componentVersionName
+
+            foreach ($vuln in $comp.vulnerabilityWithRemediation){
+                Write-Host  "`t`t`t" $vuln.vulnerabilityName
+            }
+       }
    }
 }
 
