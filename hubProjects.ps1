@@ -18,28 +18,28 @@
 #>  
 
 # change the following parameters
-$BD_HOST="localhost"
-$BD_PORT="8080"
-$BD_USERNAME="sysadmin"
-$BD_PASSWORD="blackduck"
-$COOKIE_FILE_NAME="bds-hub-cookie.txt"
-$SCHEME="http"
 
-#$DebugPreference = "Continue"
+param (
+    [Parameter(Mandatory=$true)][string]$serverUrl,
+    [Parameter(Mandatory=$true)][string]$username,
+    [string]$password = $( Read-Host "Input password: " ),
+    [string]$curlCmd
+ )
+
+$COOKIE_FILE_NAME="bds-hub-cookie.txt"
 
 ########  DON'T TOUCH THESE PARAMETERS ################
 $SCRIPT_DIR=Split-Path -Parent $PSCommandPath
 Write-Debug  $SCRIPT_DIR
-$CURL_EXE="$SCRIPT_DIR\curl.exe"
-#$CURL_EXE="curl"
+$CURL_EXE = If ($curlCmd -eq $null) { "$SCRIPT_DIR\curl.exe" } Else { $curlCmd }
 $COOKIE_FILE_PATH="$SCRIPT_DIR\$COOKIE_FILE_NAME"
 Write-Debug $CURL_EXE
-$SERVER_URL="http://${BD_HOST}:${BD_PORT}"
 ######################################################
 
 function Login {
     #get the cookie from the hub
-    $OUTPUT=&(${CURL_EXE}) -s -X POST --data "j_username=${BD_USERNAME}&j_password=${BD_PASSWORD}" -i  ${SERVER_URL}/j_spring_security_check -c "$COOKIE_FILE_PATH"
+    $OUTPUT=&(${CURL_EXE}) -s -X POST --data "j_username=${username}&j_password=${password}" -i  ${serverUrl}/j_spring_security_check -c "$COOKIE_FILE_PATH"
+    Write-Host "URL: " $serverUrl
     Write-Debug $OUTPUT.ToString()
 }
 
@@ -58,22 +58,13 @@ function Get-RelLink {
     return $null
 }
 
-## Do we need this??
-function Output-ProjectSummary {
-    $HUB_PROJECTS=&(${CURL_EXE}) -s -X GET --header "Accept: application/json" -b $COOKIE_FILE_PATH "${SERVER_URL}/api/v1/risk-profile-projects?limit=100&sortField=name&ascending=true&offset=0&_=1473846139495" | ConvertFrom-Json 
-    Write-Debug $HUB_PROJECTS
-
-    # print a table with project data , this is just a sample much more data to display if you want
-    $HUB_PROJECTS.items | Select-Object @{Name="id";Expression={ $_.id }},@{Name="Project Name";Expression={ $_.name }}, @{Name="Policy violation";Expression={ $_.policyStatus }}, @{Name="Last scan date";Expression={ $_.lastScanDate }} | Format-Table -AutoSize
-}
-
 ########################################################################################################################
 ########################################################################################################################
 
+## Login First
 Login
-Output-ProjectSummary
 
-$HUB_PROJECTS_P=&(${CURL_EXE}) -s -X GET --header "Accept: application/json" -b $COOKIE_FILE_PATH "${SERVER_URL}/api/projects" | ConvertFrom-Json 
+$HUB_PROJECTS_P=&(${CURL_EXE}) -s -X GET --header "Accept: application/json" -b $COOKIE_FILE_PATH "${serverUrl}/api/projects" | ConvertFrom-Json 
 
 foreach( $proj in $HUB_PROJECTS_P.items){
     Write-Host "`n`n################################ PROJECT ################################"
